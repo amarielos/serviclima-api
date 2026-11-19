@@ -25,4 +25,6 @@ coverage/
 # Operating system files
 .DS_Store
 Thumbs.db
+/docs/*
+!/docs/08-sesion-06-configuracion-pendiente.md
 /docs

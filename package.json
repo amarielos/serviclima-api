@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "node --watch --env-file=.env index.js",
-    "start": "node --env-file=.env index.js",
+    "start": "node --env-file-if-exists=.env index.js",
     "test": "node --test",
     "reiniciar-db": "node --env-file=.env reiniciar-db.js"
   },
@@ -17,6 +17,9 @@
     "node": ">=24"
   },
   "dependencies": {
-    "express": "^5.3.0"
+    "cors": "^2.8.6",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.5",
+    "helmet": "^8.3.0"
   }
 }

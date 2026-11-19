@@ -218,3 +218,41 @@ GET {{base}}/ordenes?estado=x'%20OR%20'1'='1
 
 ### Resumen: totales por estado y por técnico
 GET {{base}}/resumen
+
+# ------------------------------------------------------------
+# Sesión 6: seguridad y producción
+# ------------------------------------------------------------
+
+# PENDIENTE: reemplazar por la URL real de la API, sin barra final.
+# .invalid es un marcador de posición; no corresponde a un servicio de Render.
+@produccion = https://REEMPLAZAR-URL-DE-LA-API.invalid
+
+### Encabezados locales: Content-Security-Policy, CORS y RateLimit (200)
+# RateLimit debe indicar limit=100; remaining y reset dependen de las peticiones previas.
+GET {{base}}/departamentos
+Origin: http://localhost:5173
+
+# Reutilizar la petición "Preflight del navegador" de arriba: debe devolver 204
+# con Access-Control-Allow-Origin, métodos y Content-Type permitidos.
+
+### Producción: listado (ejecutar después del despliegue manual)
+GET {{produccion}}/ordenes
+
+### Producción: resumen (ejecutar después del despliegue manual)
+GET {{produccion}}/resumen
+
+### Producción: crear una orden válida (201; modifica datos, ejecutar manualmente)
+POST {{produccion}}/ordenes
+Content-Type: application/json
+
+{
+  "cliente": "Ferretería El Progreso",
+  "nit": "4455667-8",
+  "departamento": "Guatemala",
+  "categoria": "Mantenimiento preventivo",
+  "tecnico": "Ana Chacón",
+  "fecha": "2026-11-18",
+  "horas": 2,
+  "monto": 650,
+  "estado": "pendiente"
+}

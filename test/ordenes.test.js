@@ -17,10 +17,10 @@ async function detener(proceso) {
   await terminado;
 }
 
-async function iniciar(rutaDb, procesos) {
+async function iniciar(rutaDb, procesos, entorno = {}) {
   const proceso = spawn(process.execPath, ['index.js'], {
     cwd: raiz,
-    env: { ...process.env, PUERTO: '0', ORIGEN_FRONTEND: origen, RUTA_DB: rutaDb },
+    env: { ...process.env, PORT: '0', PUERTO: '0', ORIGEN_FRONTEND: origen, RUTA_DB: rutaDb, ...entorno },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   procesos.push(proceso);
@@ -65,10 +65,16 @@ test('Contrato HTTP de órdenes y persistencia con SQLite', { timeout: 30000 }, 
   });
   let api = await iniciar(rutaDb, procesos);
 
+  // Cada caso representa un cliente distinto detrás del proxy, sin agotar el
+  // límite de producción con la suma de solicitudes de toda la regresión.
+  let cliente = 0;
+  let ipCliente;
+  t.beforeEach(() => { ipCliente = `192.0.2.${++cliente}`; });
+
   async function pedir(ruta, metodo = 'GET', datos) {
     const respuesta = await fetch(api.base + ruta, {
       method: metodo,
-      headers: { 'Content-Type': 'application/json', Origin: origen },
+      headers: { 'Content-Type': 'application/json', Origin: origen, 'X-Forwarded-For': ipCliente },
       body: datos === undefined ? undefined : JSON.stringify(datos),
     });
     return { estado: respuesta.status, datos: await respuesta.json(), cabeceras: respuesta.headers };
@@ -99,6 +105,7 @@ test('Contrato HTTP de órdenes y persistencia con SQLite', { timeout: 30000 }, 
       method: 'OPTIONS',
       headers: {
         Origin: origen,
+        'X-Forwarded-For': ipCliente,
         'Access-Control-Request-Method': 'POST',
         'Access-Control-Request-Headers': 'content-type',
       },
@@ -106,8 +113,59 @@ test('Contrato HTTP de órdenes y persistencia con SQLite', { timeout: 30000 }, 
     assert.equal(respuesta.status, 204);
     assert.equal(await respuesta.text(), '');
     assert.equal(respuesta.headers.get('access-control-allow-origin'), origen);
-    assert.equal(respuesta.headers.get('access-control-allow-methods'), 'GET, POST, PUT, PATCH, DELETE');
+    assert.deepEqual(
+      respuesta.headers.get('access-control-allow-methods').split(',').map((metodo) => metodo.trim()).sort(),
+      ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].sort(),
+    );
     assert.equal(respuesta.headers.get('access-control-allow-headers'), 'Content-Type');
+  });
+
+  await t.test('Helmet y límite de 100 peticiones por cliente detrás del proxy', async () => {
+    const primera = await pedir('/departamentos');
+    assert.equal(primera.estado, 200);
+    assert.ok(primera.cabeceras.get('content-security-policy'));
+    assert.equal(primera.cabeceras.get('x-content-type-options'), 'nosniff');
+    assert.equal(primera.cabeceras.get('x-powered-by'), null);
+    assert.equal(primera.cabeceras.get('access-control-allow-origin'), origen);
+    assert.match(primera.cabeceras.get('ratelimit'), /limit=100/);
+    assert.match(primera.cabeceras.get('ratelimit'), /remaining=99/);
+    assert.match(primera.cabeceras.get('ratelimit-policy'), /100;w=900/);
+
+    for (let numero = 2; numero <= 100; numero++) {
+      assert.equal((await pedir('/departamentos')).estado, 200);
+    }
+    const bloqueada = await pedir('/departamentos');
+    assert.equal(bloqueada.estado, 429);
+    assert.deepEqual(bloqueada.datos, {
+      error: 'Demasiadas peticiones. Intente de nuevo en unos minutos', detalles: [],
+    });
+    assert.ok(Number(bloqueada.cabeceras.get('retry-after')) > 0);
+    assert.match(bloqueada.cabeceras.get('ratelimit'), /remaining=0/);
+    assert.ok(bloqueada.cabeceras.get('content-security-policy'));
+    assert.equal(bloqueada.cabeceras.get('access-control-allow-origin'), origen);
+    for (const nombre of bloqueada.cabeceras.keys()) {
+      assert.equal(nombre.startsWith('x-ratelimit-'), false);
+    }
+
+    const otroCliente = await fetch(api.base + '/departamentos', {
+      headers: { Origin: origen, 'X-Forwarded-For': '198.51.100.1' },
+    });
+    assert.equal(otroCliente.status, 200);
+    assert.match(otroCliente.headers.get('ratelimit'), /remaining=99/);
+    await otroCliente.arrayBuffer();
+  });
+
+  await t.test('PORT tiene prioridad y PUERTO funciona cuando PORT está ausente', async () => {
+    for (const entorno of [{ PORT: '0', PUERTO: 'invalido' }, { PORT: undefined, PUERTO: '0' }]) {
+      const alternativa = await iniciar(rutaDb, procesos, entorno);
+      try {
+        const respuesta = await fetch(alternativa.base + '/resumen');
+        assert.equal(respuesta.status, 200);
+        assert.equal((await respuesta.json()).total.ordenes, 24);
+      } finally {
+        await detener(alternativa.proceso);
+      }
+    }
   });
 
   await t.test('Crear, combinar, reemplazar y eliminar conservando ID y código', async () => {
@@ -274,7 +332,7 @@ test('Contrato HTTP de órdenes y persistencia con SQLite', { timeout: 30000 }, 
     const antes = (await pedir('/ordenes')).datos;
     const respuesta = await fetch(api.base + '/ordenes', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Origin: origen },
+      headers: { 'Content-Type': 'application/json', Origin: origen, 'X-Forwarded-For': ipCliente },
       body: '{ "cliente": "Ferretería El Progreso\n}',
     });
     assert.equal(respuesta.status, 400);

@@ -1,17 +1,29 @@
 import express from 'express';
+import helmet from 'helmet';
+import cors from 'cors';
 import rutasOrdenes from './src/rutas/ordenes.js';
 import rutasCatalogos from './src/rutas/catalogos.js';
 import rutasResumen from './src/rutas/resumen.js';
 import { registrarPeticion } from './src/middlewares/registrar-peticion.js';
-import { permitirOrigen } from './src/middlewares/permitir-origen.js';
+import { limitarPeticiones } from './src/middlewares/limitar-peticiones.js';
 import { noEncontrado } from './src/middlewares/no-encontrado.js';
 import { manejarErrores } from './src/middlewares/manejar-errores.js';
 
-const PUERTO = Number(process.env.PUERTO);
+// Render proporciona PORT; en local se conserva PUERTO del archivo .env.
+const PUERTO = Number(process.env.PORT ?? process.env.PUERTO);
 const app = express();
 
+app.set('trust proxy', 1);
+
 app.use(registrarPeticion);
-app.use(permitirOrigen);
+app.use(helmet());
+app.use(cors({
+  origin: process.env.ORIGEN_FRONTEND,
+  // Se conserva el contrato del preflight de las sesiones anteriores.
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  allowedHeaders: ['Content-Type'],
+}));
+app.use(limitarPeticiones);
 app.use(express.json());
 app.use('/ordenes', rutasOrdenes);
 app.use(rutasCatalogos);
