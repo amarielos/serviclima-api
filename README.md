@@ -1,10 +1,10 @@
 # Serviclima API
 
-API de órdenes de servicio con Node.js y Express. Los datos iniciales están en `datos/db.json` y se cargan en memoria al arrancar.
+API de órdenes de servicio con Node.js, Express y SQLite. Las órdenes se guardan en `datos/serviclima.db` y sobreviven a los reinicios del backend local. `datos/db.json` contiene los datos iniciales del curso.
 
 ## Requisitos y arranque
 
-Node.js 22 o superior y npm. Desde la raíz del proyecto:
+Node.js 24 o superior y npm. La guía recomienda Node 26; esta implementación se comprobó con Node `24.19.0` y su módulo integrado `node:sqlite`. SQLite no necesita paquetes adicionales de npm. Desde la raíz del proyecto:
 
 ```powershell
 npm ci
@@ -21,7 +21,9 @@ PUERTO=3001
 ORIGEN_FRONTEND=http://localhost:5173
 ```
 
-`.env` y `node_modules/` están ignorados por Git. `.env.example` y `package-lock.json` se incluyen en el repositorio.
+`.env`, `node_modules/`, los archivos `*.db` y sus auxiliares SQLite están ignorados por Git. `.env.example` y `package-lock.json` se incluyen en el repositorio.
+
+La ruta predeterminada de la base se calcula desde el código, independientemente del directorio de la terminal. Opcionalmente se puede definir `RUTA_DB` con una ruta absoluta para usar una base alternativa, como hacen las pruebas. Su carpeta debe existir.
 
 ## Operaciones
 
@@ -29,8 +31,10 @@ ORIGEN_FRONTEND=http://localhost:5173
 | --- | --- | --- |
 | GET | `/ordenes` | Listado completo, `200`. |
 | GET | `/ordenes/:id` | Detalle, `200`; si no existe, `404`. |
+| GET | `/ordenes?estado=pendiente` | Listado filtrado por estado, `200`. |
 | GET | `/departamentos` | Catálogo de los ocho departamentos permitidos, `200`. |
 | GET | `/categorias` | Catálogo de las cuatro categorías permitidas, `200`. |
+| GET | `/resumen` | Totales y agrupaciones SQL por estado y técnico, `200`. |
 | POST | `/ordenes` | Crea una orden y asigna ID/código, `201`. |
 | PUT | `/ordenes/:id` | Reemplaza los datos conservando ID/código, `200`. |
 | PATCH | `/ordenes/:id` | Combina los cambios conservando ID/código, `200`. |
@@ -38,6 +42,25 @@ ORIGEN_FRONTEND=http://localhost:5173
 | OPTIONS | `/ordenes` o `/ordenes/:id` | Preflight CORS, `204` sin cuerpo. |
 
 PUT, PATCH y DELETE también devuelven `404` para órdenes inexistentes si el cuerpo enviado es válido. Un ID no numérico devuelve el mismo tipo de error. Las rutas desconocidas responden `404` en JSON.
+
+## Filtros y resumen (sesión 5)
+
+`GET /ordenes` acepta coincidencias exactas por `estado`, `tecnico` y `departamento`, combinadas con `AND`. Por ejemplo:
+
+```http
+GET /ordenes?estado=completada&tecnico=Ana%20Chac%C3%B3n
+GET /ordenes?departamento=Guatemala
+```
+
+El listado se ordena por ID. Sin coincidencias devuelve `200` con `[]`. Los filtros desconocidos se ignoran, así como los valores que llegan como arreglos al repetir un mismo parámetro. Los nombres de las columnas salen de una lista permitida y los valores se enlazan como parámetros; no se concatenan datos del usuario en el SQL.
+
+`GET /resumen` devuelve:
+
+- `total`: cantidad de `ordenes` y suma de `monto`.
+- `porEstado`: `estado`, `ordenes` y `monto`, ordenados por cantidad descendente.
+- `porTecnico`: `tecnico`, `ordenes`, `horas` y `monto`, ordenados por monto descendente.
+
+Los importes y las horas agregadas se redondean a dos decimales. Los resultados reflejan las creaciones, modificaciones y eliminaciones guardadas en la base. Si la tabla queda vacía durante la ejecución, `total.ordenes` es cero y `total.monto` es `null`, como en el `SUM` de la guía.
 
 ## Validaciones y errores (sesión 4)
 
@@ -68,18 +91,33 @@ Los errores comparten el formato `{ "error": "...", "detalles": [] }`. Los datos
 
 Un JSON mal escrito responde `400` con `El cuerpo no es un JSON válido`. Una orden inexistente responde `404` con `No existe la orden 999` y detalles vacíos. Los errores inesperados responden `500` con `Error interno del servidor`; la traza solo se registra en el servidor.
 
-Las creaciones, ediciones y eliminaciones son temporales: **al reiniciar se recuperan las 24 órdenes originales**. La API no escribe en `datos/db.json`.
+## Persistencia y datos iniciales
+
+`src/db.js` abre o crea `datos/serviclima.db`, crea la tabla si no existe e importa el JSON únicamente si la tabla está vacía. Una base con órdenes no se sobrescribe ni vuelve a recibir el seed al arrancar. La API no modifica `datos/db.json`.
+
+SQLite asigna el ID y el servicio genera el código dentro de la misma transacción. El seed también se inserta en una transacción para evitar cargas parciales. La tabla añade restricciones `UNIQUE`, `NOT NULL` y `CHECK` para códigos, campos requeridos, catálogos y límites numéricos.
+
+Las creaciones, ediciones y eliminaciones **permanecen después de reiniciar la API** mientras se conserve el archivo de la base. Si se eliminan todas las órdenes, el próximo arranque vuelve a sembrar la tabla vacía, de acuerdo con la guía.
+
+### Reinicio de desarrollo
+
+El script `npm run reiniciar-db` **elimina la tabla de órdenes y todos sus datos actuales**, la recrea y carga `datos/db.json`. Lee el mismo `.env` de la API, incluida `RUTA_DB` si está configurada. Usarlo solo por decisión expresa con datos de desarrollo prescindibles: detener la API y respaldar el archivo antes. Cambiar `src/catalogos.js` no actualiza los `CHECK` de una tabla existente; el reinicio de desarrollo los recrea, pero borra las órdenes guardadas. Este script no forma parte del arranque ni de `npm test`.
+
+La persistencia descrita es local. Un despliegue con disco efímero puede perder el archivo al reiniciarse o redesplegarse: el seed recupera datos iniciales, no las órdenes nuevas de usuarios.
 
 ## Estructura
 
 - `index.js`: configura Express y registra rutas; termina con el 404 y el manejador central de errores.
 - `src/catalogos.js`: departamentos, categorías y estados compartidos por las consultas y la validación.
 - `src/errores.js`: clase `ErrorHttp`, con estado HTTP y detalles.
+- `src/db.js`: conexión SQLite, esquema y seed inicial.
 - `src/validaciones/ordenes.js`: reglas y selección de campos permitidos.
 - `src/rutas/`: asocia métodos y rutas con validaciones y controladores de órdenes y catálogos.
 - `src/controladores/`: recibe solicitudes, responde por HTTP y lanza errores de órdenes inexistentes.
-- `src/servicios/ordenes.js`: carga los datos y realiza las operaciones en memoria.
+- `src/servicios/ordenes.js`: CRUD, filtros y resumen mediante SQL parametrizado.
+- `src/controladores/resumen.js` y `src/rutas/resumen.js`: publican el resumen manteniendo las capas.
 - `src/middlewares/`: registro, CORS, validación completa/parcial, rutas inexistentes y manejo central de errores.
+- `reiniciar-db.js`: utilidad destructiva de desarrollo para restaurar los datos iniciales.
 
 ## Pruebas
 
@@ -87,9 +125,11 @@ Las creaciones, ediciones y eliminaciones son temporales: **al reiniciar se recu
 npm test
 ```
 
-Las pruebas arrancan sus propios servidores en puertos disponibles. Comprueban los datos iniciales, CRUD, catálogos, validación completa y parcial, descarte de extras, errores `400`/`404`/`500`, CORS, conservación de ID/código y recuperación después del reinicio. Los errores internos se fuerzan en rutas exclusivas del test, sin añadir rutas de fallos al entregable. No necesitan otro servidor activo ni alteran el JSON original.
+Las pruebas arrancan sus propios servidores en puertos disponibles y crean una base SQLite temporal aislada de `datos/serviclima.db`. Comprueban datos iniciales, CRUD, validación, errores `400`/`404`/`500`, CORS, catálogos, filtros simples y combinados, inyección SQL, agregaciones, restricciones de SQLite y persistencia tras reiniciar. No ejecutan el script de reinicio ni alteran la base de uso o el JSON original. Los errores internos se fuerzan en rutas exclusivas del test.
 
-Para probar manualmente, iniciar la API y abrir `peticiones.http` con REST Client en VS Code. Ejecutar las peticiones en orden después de reiniciar: los ejemplos de creación y modificación utilizan el ID 25. Se conservan las solicitudes de la sesión 3 y se añaden los 12 casos de la sesión 4. El último JSON está mal escrito a propósito para comprobar el error del parser.
+Para probar manualmente, iniciar la API y abrir `peticiones.http` con REST Client en VS Code. Se conservan las solicitudes de las sesiones 3 y 4 y se añaden nueve de la sesión 5. El JSON mal escrito de la sesión 4 es intencional.
+
+Los ejemplos anteriores usan el ID 25: ajustarlo al ID devuelto por cada POST si la base ya tiene cambios. Reiniciar el servidor ya no restablece los datos. Los conteos de la guía 5 suponen las 24 órdenes iniciales más su POST de persistencia; otras escrituras cambian esos resultados. No reiniciar ni borrar una base con datos útiles solo para igualar los ejemplos.
 
 ## Conexión con el frontend
 
@@ -101,6 +141,6 @@ Copy-Item .env.example .env
 npm run dev
 ```
 
-Conservar el `.env` si ya existe y verificar `VITE_API_URL=http://localhost:3001`. Abrir `http://localhost:5173` y comprobar listado, detalle, creación, edición, completar y eliminación.
+Conservar el `.env` si ya existe y verificar `VITE_API_URL=http://localhost:3001`. Abrir `http://localhost:5173` y comprobar listado, detalle, creación, edición, completar y eliminación. Crear una orden, reiniciar solo la API y recargar el listado: debe seguir presente. El código del frontend no cambia.
 
 Mantener ambas terminales activas. `ORIGEN_FRONTEND` debe coincidir con el origen del navegador; `localhost` y `127.0.0.1` son distintos. No iniciar `npm run api` del frontend mientras Express usa el puerto 3001, porque ese comando arranca otro backend con `json-server`.

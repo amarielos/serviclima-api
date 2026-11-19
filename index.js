@@ -1,6 +1,7 @@
 import express from 'express';
 import rutasOrdenes from './src/rutas/ordenes.js';
 import rutasCatalogos from './src/rutas/catalogos.js';
+import rutasResumen from './src/rutas/resumen.js';
 import { registrarPeticion } from './src/middlewares/registrar-peticion.js';
 import { permitirOrigen } from './src/middlewares/permitir-origen.js';
 import { noEncontrado } from './src/middlewares/no-encontrado.js';
@@ -14,6 +15,7 @@ app.use(permitirOrigen);
 app.use(express.json());
 app.use('/ordenes', rutasOrdenes);
 app.use(rutasCatalogos);
+app.use(rutasResumen);
 
 // Después de todas las rutas: primero el 404 y al final los errores.
 app.use(noEncontrado);

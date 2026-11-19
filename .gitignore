@@ -1,5 +1,11 @@
 node_modules/
 
+# Bases SQLite locales y sus archivos auxiliares
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
 # Environment files
 .env
 .env.*
@@ -19,3 +25,4 @@ coverage/
 # Operating system files
 .DS_Store
 Thumbs.db
+/docs

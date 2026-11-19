@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, rmdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 const raiz = path.join(import.meta.dirname, '..');
@@ -15,13 +17,13 @@ async function detener(proceso) {
   await terminado;
 }
 
-async function iniciar(t) {
+async function iniciar(rutaDb, procesos) {
   const proceso = spawn(process.execPath, ['index.js'], {
     cwd: raiz,
-    env: { ...process.env, PUERTO: '0', ORIGEN_FRONTEND: origen },
+    env: { ...process.env, PUERTO: '0', ORIGEN_FRONTEND: origen, RUTA_DB: rutaDb },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  t.after(() => detener(proceso));
+  procesos.push(proceso);
 
   const base = await new Promise((resolve, reject) => {
     let salida = '';
@@ -48,11 +50,20 @@ async function iniciar(t) {
   return { proceso, base };
 }
 
-test('Contrato HTTP de órdenes y datos en memoria', { timeout: 30000 }, async (t) => {
+test('Contrato HTTP de órdenes y persistencia con SQLite', { timeout: 30000 }, async (t) => {
   const rutaDatos = path.join(raiz, 'datos', 'db.json');
   const contenidoOriginal = await readFile(rutaDatos, 'utf8');
   const { ordenes } = JSON.parse(contenidoOriginal);
-  let api = await iniciar(t);
+  const directorio = await mkdtemp(path.join(tmpdir(), 'serviclima-test-'));
+  const rutaDb = path.join(directorio, 'pruebas.db');
+  const procesos = [];
+  t.after(async () => {
+    for (const proceso of procesos) await detener(proceso);
+    // Se elimina únicamente el archivo temporal creado por esta prueba.
+    await rm(rutaDb, { force: true });
+    await rmdir(directorio);
+  });
+  let api = await iniciar(rutaDb, procesos);
 
   async function pedir(ruta, metodo = 'GET', datos) {
     const respuesta = await fetch(api.base + ruta, {
@@ -272,14 +283,114 @@ test('Contrato HTTP de órdenes y datos en memoria', { timeout: 30000 }, async (
     assert.deepEqual((await pedir('/ordenes')).datos, antes);
   });
 
-  await t.test('El reinicio restaura los datos y no modifica db.json', async () => {
+  await t.test('Filtros exactos, combinados, desconocidos y repetidos', async () => {
+    for (const filtros of [
+      { estado: 'pendiente' }, { tecnico: 'Mario Ixcot' }, { departamento: 'Guatemala' },
+      { estado: 'completada', tecnico: 'Ana Chacón' },
+      { estado: 'pendiente', departamento: 'Guatemala', tecnico: 'Mario Ixcot' },
+      { estado: 'archivada' },
+    ]) {
+      const respuesta = await pedir('/ordenes?' + new URLSearchParams(filtros));
+      assert.equal(respuesta.estado, 200);
+      assert.deepEqual(respuesta.datos, ordenes.filter((orden) =>
+        Object.entries(filtros).every(([campo, valor]) => orden[campo] === valor)
+      ));
+    }
+    assert.deepEqual((await pedir('/ordenes?color=rojo')).datos, ordenes);
+    assert.deepEqual((await pedir('/ordenes?estado=pendiente&estado=completada')).datos, ordenes);
+    assert.deepEqual((await pedir('/ordenes?estado=pendiente&color=rojo')).datos,
+      ordenes.filter((orden) => orden.estado === 'pendiente'));
+  });
+
+  await t.test('Los parámetros SQL tratan las comillas y las inyecciones como datos', async () => {
+    const malicioso = "x' OR '1'='1";
+    const ataque = await pedir('/ordenes?' + new URLSearchParams({ estado: malicioso }));
+    assert.equal(ataque.estado, 200);
+    assert.deepEqual(ataque.datos, []);
+    assert.equal((await pedir('/ordenes/1%20OR%201=1')).estado, 404);
+
+    const creada = await pedir('/ordenes', 'POST', {
+      ...ordenes[0], cliente: "Taller D'Angelo", tecnico: malicioso,
+    });
+    assert.equal(creada.estado, 201);
+    const filtro = await pedir('/ordenes?' + new URLSearchParams({ tecnico: malicioso }));
+    assert.deepEqual(filtro.datos, [creada.datos]);
+    const cambio = await pedir(`/ordenes/${creada.datos.id}`, 'PATCH', { cliente: "'; DROP TABLE ordenes; --" });
+    assert.equal(cambio.estado, 200);
+    assert.equal(cambio.datos.cliente, "'; DROP TABLE ordenes; --");
+    await pedir(`/ordenes/${creada.datos.id}`, 'DELETE');
+    assert.deepEqual((await pedir('/ordenes')).datos, ordenes);
+  });
+
+  async function comprobarResumen() {
+    const actuales = (await pedir('/ordenes')).datos;
+    const respuesta = await pedir('/resumen');
+    assert.equal(respuesta.estado, 200);
+    assert.equal(respuesta.cabeceras.get('access-control-allow-origin'), origen);
+    const redondear = (valor) => Math.round(valor * 100) / 100;
+    assert.deepEqual(respuesta.datos.total, {
+      ordenes: actuales.length,
+      monto: redondear(actuales.reduce((suma, orden) => suma + orden.monto, 0)),
+    });
+
+    for (const [campo, clave] of [['estado', 'porEstado'], ['tecnico', 'porTecnico']]) {
+      const grupos = new Map();
+      for (const orden of actuales) {
+        const grupo = grupos.get(orden[campo]) ?? { [campo]: orden[campo], ordenes: 0, monto: 0 };
+        grupo.ordenes++;
+        grupo.monto += orden.monto;
+        if (campo === 'tecnico') grupo.horas = (grupo.horas ?? 0) + orden.horas;
+        grupos.set(orden[campo], grupo);
+      }
+      const esperados = [...grupos.values()].map((grupo) => ({
+        ...grupo, monto: redondear(grupo.monto),
+        ...(campo === 'tecnico' ? { horas: redondear(grupo.horas) } : {}),
+      }));
+      const ordenar = (a, b) => a[campo].localeCompare(b[campo]);
+      assert.deepEqual([...respuesta.datos[clave]].sort(ordenar), esperados.sort(ordenar));
+      const criterio = campo === 'estado' ? 'ordenes' : 'monto';
+      for (let i = 1; i < respuesta.datos[clave].length; i++) {
+        assert.ok(respuesta.datos[clave][i - 1][criterio] >= respuesta.datos[clave][i][criterio]);
+      }
+    }
+    return respuesta.datos;
+  }
+
+  await t.test('Resumen SQL con cantidades, montos y horas por técnico', comprobarResumen);
+
+  await t.test('SQLite aplica UNIQUE, NOT NULL y CHECK aunque se omita la validación HTTP', () => {
+    const conexion = new DatabaseSync(rutaDb);
+    try {
+      assert.throws(() => conexion.prepare('UPDATE ordenes SET codigo = ? WHERE id = 1').run(ordenes[1].codigo), /UNIQUE constraint failed/);
+      assert.throws(() => conexion.prepare('UPDATE ordenes SET cliente = NULL WHERE id = 1').run(), /NOT NULL constraint failed/);
+      for (const [campo, valor] of [
+        ['departamento', 'Marte'], ['categoria', 'Limpieza'], ['estado', 'terminada'],
+        ['horas', 0], ['horas', 25], ['monto', 0],
+      ]) {
+        // Los nombres de columna provienen exclusivamente de estos casos de prueba.
+        assert.throws(() => conexion.prepare(`UPDATE ordenes SET ${campo} = ? WHERE id = 1`).run(valor), /CHECK constraint failed/);
+      }
+    } finally {
+      conexion.close();
+    }
+  });
+
+  await t.test('El reinicio conserva creaciones, cambios y eliminaciones sin repetir el seed', async () => {
     assert.equal((await pedir('/ordenes/1', 'PATCH', { estado: 'cancelada' })).estado, 200);
-    assert.equal((await pedir('/ordenes', 'POST', ordenes[0])).estado, 201);
+    const creada = await pedir('/ordenes', 'POST', ordenes[0]);
+    assert.equal(creada.estado, 201);
+    assert.equal((await pedir(`/ordenes/${creada.datos.id}`, 'PUT', { ...creada.datos, monto: 900 })).estado, 200);
     assert.equal((await pedir('/ordenes/2', 'DELETE')).estado, 200);
+    const antes = (await pedir('/ordenes')).datos;
+    const resumenAntes = await comprobarResumen();
     assert.equal(await readFile(rutaDatos, 'utf8'), contenidoOriginal);
     await detener(api.proceso);
-    api = await iniciar(t);
-    assert.deepEqual((await pedir('/ordenes')).datos, ordenes);
+    api = await iniciar(rutaDb, procesos);
+    assert.deepEqual((await pedir('/ordenes')).datos, antes);
+    assert.equal((await pedir(`/ordenes/${creada.datos.id}`)).datos.monto, 900);
+    assert.equal((await pedir('/ordenes/1')).datos.estado, 'cancelada');
+    assert.equal((await pedir('/ordenes/2')).estado, 404);
+    assert.deepEqual(await comprobarResumen(), resumenAntes);
     assert.equal(await readFile(rutaDatos, 'utf8'), contenidoOriginal);
   });
 });

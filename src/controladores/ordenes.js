@@ -6,7 +6,7 @@ function noExiste(id) {
 }
 
 export function listarOrdenes(req, res) {
-  res.json(servicio.listar());
+  res.json(servicio.listar(req.query));
 }
 
 export function obtenerOrden(req, res) {
